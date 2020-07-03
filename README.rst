@@ -2,34 +2,22 @@
 aioresponses
 ===============================
 
-.. image:: https://travis-ci.org/pnuckowski/aioresponses.svg?branch=master
-        :target: https://travis-ci.org/pnuckowski/aioresponses
-
-.. image:: https://coveralls.io/repos/github/pnuckowski/aioresponses/badge.svg?branch=master
-        :target: https://coveralls.io/github/pnuckowski/aioresponses?branch=master
-
-.. image:: https://landscape.io/github/pnuckowski/aioresponses/master/landscape.svg?style=flat
-        :target: https://landscape.io/github/pnuckowski/aioresponses/master
-        :alt: Code Health
-
-.. image:: https://pyup.io/repos/github/pnuckowski/aioresponses/shield.svg
-        :target: https://pyup.io/repos/github/pnuckowski/aioresponses/
-        :alt: Updates
-
-.. image:: https://img.shields.io/pypi/v/aioresponses.svg
-        :target: https://pypi.python.org/pypi/aioresponses
-
-.. image:: https://readthedocs.org/projects/aioresponses/badge/?version=latest
-        :target: https://aioresponses.readthedocs.io/en/latest/?badge=latest
-        :alt: Documentation Status
-
-
 Aioresponses is a helper to mock/fake web requests in python aiohttp package.
 
 For *requests* module there are a lot of packages that help us with testing (eg. *httpretty*, *responses*, *requests-mock*).
 
 When it comes to testing asynchronous HTTP requests it is a bit harder (at least at the beginning).
 The purpose of this package is to provide an easy way to test asynchronous HTTP requests.
+
+
+Fork features:
+--------------
+- passthrough all requests by default
+  (see `passthough_all` flag in constructor)
+- `add()` and similar methods return `RequestMatcher` with `requests` field,
+  which makes it possible to inspect requests for specific matcher
+- `RequestInfo` has a reference to the response, and all its fields are typed
+  for better coding experience
 
 Installing
 ----------

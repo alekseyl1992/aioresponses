@@ -1,11 +1,12 @@
-# -*- coding: utf-8 -*-
 import asyncio
+import dataclasses
 import json
 import copy
-from collections import namedtuple
+from dataclasses import dataclass
 from distutils.version import StrictVersion
 from functools import wraps
-from typing import Callable, Dict, Tuple, Union, Optional, List  # noqa
+from types import SimpleNamespace
+from typing import Callable, Dict, Tuple, Union, Optional, List, Mapping, Any, Iterable, MutableMapping  # noqa
 from unittest.mock import Mock, patch
 import inspect
 from aiohttp import (
@@ -13,9 +14,11 @@ from aiohttp import (
     ClientResponse,
     ClientSession,
     hdrs,
-    http
+    http, Fingerprint, ClientTimeout
 )
-from aiohttp.helpers import TimerNoop
+from aiohttp.connector import SSLContext
+from aiohttp.helpers import TimerNoop, BasicAuth, sentinel
+from aiohttp.typedefs import LooseCookies, LooseHeaders, StrOrURL
 from multidict import CIMultiDict, CIMultiDictProxy
 
 from .compat import (
@@ -29,7 +32,6 @@ from .compat import (
 
 
 class CallbackResult:
-
     def __init__(self, method: str = hdrs.METH_GET,
                  status: int = 200,
                  body: str = '',
@@ -48,7 +50,7 @@ class CallbackResult:
         self.reason = reason
 
 
-class RequestMatch(object):
+class RequestMatcher:
     url_or_pattern = None  # type: Union[URL, Pattern]
 
     def __init__(self, url: Union[URL, str, Pattern],
@@ -89,6 +91,8 @@ class RequestMatch(object):
                 self.reason = ''
         self.callback = callback
 
+        self.requests: List[RequestInfo] = []
+
     def match_str(self, url: URL) -> bool:
         return self.url_or_pattern == url
 
@@ -100,7 +104,7 @@ class RequestMatch(object):
             return False
         return self.match_func(url)
 
-    def _build_raw_headers(self, headers: Dict) -> Tuple:
+    def _build_raw_headers(self, headers: MutableMapping) -> Tuple:
         """
         Convert a dict of headers to a tuple of tuples
 
@@ -201,22 +205,66 @@ class RequestMatch(object):
         return resp
 
 
-RequestCall = namedtuple('RequestCall', ['args', 'kwargs'])
+@dataclass
+class RequestInfo:
+    method: str
+    url: URL
+    params: Optional[Mapping[str, str]] = None
+    data: Any = None
+    json: Any = None
+    cookies: Optional[LooseCookies] = None
+    headers: LooseHeaders = None
+    skip_auto_headers: Optional[Iterable[str]] = None
+    auth: Optional[BasicAuth] = None
+    allow_redirects: bool = True
+    max_redirects: int = 10
+    compress: Optional[str] = None
+    chunked: Optional[bool] = None
+    expect100: bool = False
+    raise_for_status: Optional[bool] = None
+    read_until_eof: bool = True
+    proxy: Optional[StrOrURL] = None
+    proxy_auth: Optional[BasicAuth] = None
+    timeout: Union[ClientTimeout, object] = sentinel
+    verify_ssl: Optional[bool] = None
+    fingerprint: Optional[bytes] = None
+    ssl_context: Optional[SSLContext] = None
+    ssl: Optional[Union[SSLContext, bool, Fingerprint]] = None
+    proxy_headers: Optional[LooseHeaders] = None
+    trace_request_ctx: Optional[SimpleNamespace] = None
+
+    kwargs: Dict = None
+
+    response: Optional[ClientResponse] = None
+
+    def __init__(self, **kwargs):
+        self.kwargs = {}
+        self.response = None
+
+        names = set([f.name for f in dataclasses.fields(self)])
+        for k, v in kwargs.items():
+            if k in names:
+                setattr(self, k, v)
+            else:
+                self.kwargs[k] = v
+
+
+RequestsKey = Tuple[str, URL]
 
 
 class aioresponses(object):
     """Mock aiohttp requests made by ClientSession."""
-    _matches = None  # type: List[RequestMatch]
-    _responses = None  # type: List[ClientResponse]
-    requests = None  # type: Dict
 
     def __init__(self, **kwargs):
         self._param = kwargs.pop('param', None)
         self._passthrough = kwargs.pop('passthrough', [])
+        self._passthrough_all = kwargs.pop('passthrough_all', True)
         self.patcher = patch('aiohttp.client.ClientSession._request',
                              side_effect=self._request_mock,
                              autospec=True)
-        self.requests = {}
+
+        self._matches: List[RequestMatcher] = []
+        self.requests: Dict[RequestsKey, List[RequestInfo]] = {}
 
     def __enter__(self) -> 'aioresponses':
         self.start()
@@ -248,41 +296,38 @@ class aioresponses(object):
         return wrapped
 
     def clear(self):
-        self._responses.clear()
+        self.requests.clear()
         self._matches.clear()
 
     def start(self):
-        self._responses = []
         self._matches = []
         self.patcher.start()
         self.patcher.return_value = self._request_mock
 
     def stop(self) -> None:
-        for response in self._responses:
-            response.close()
         self.patcher.stop()
         self.clear()
 
     def head(self, url: 'Union[URL, str, Pattern]', **kwargs):
-        self.add(url, method=hdrs.METH_HEAD, **kwargs)
+        return self.add(url, method=hdrs.METH_HEAD, **kwargs)
 
     def get(self, url: 'Union[URL, str, Pattern]', **kwargs):
-        self.add(url, method=hdrs.METH_GET, **kwargs)
+        return self.add(url, method=hdrs.METH_GET, **kwargs)
 
     def post(self, url: 'Union[URL, str, Pattern]', **kwargs):
-        self.add(url, method=hdrs.METH_POST, **kwargs)
+        return self.add(url, method=hdrs.METH_POST, **kwargs)
 
     def put(self, url: 'Union[URL, str, Pattern]', **kwargs):
-        self.add(url, method=hdrs.METH_PUT, **kwargs)
+        return self.add(url, method=hdrs.METH_PUT, **kwargs)
 
     def patch(self, url: 'Union[URL, str, Pattern]', **kwargs):
-        self.add(url, method=hdrs.METH_PATCH, **kwargs)
+        return self.add(url, method=hdrs.METH_PATCH, **kwargs)
 
     def delete(self, url: 'Union[URL, str, Pattern]', **kwargs):
-        self.add(url, method=hdrs.METH_DELETE, **kwargs)
+        return self.add(url, method=hdrs.METH_DELETE, **kwargs)
 
     def options(self, url: 'Union[URL, str, Pattern]', **kwargs):
-        self.add(url, method=hdrs.METH_OPTIONS, **kwargs)
+        return self.add(url, method=hdrs.METH_OPTIONS, **kwargs)
 
     def add(self, url: 'Union[URL, str, Pattern]', method: str = hdrs.METH_GET,
             status: int = 200,
@@ -295,8 +340,9 @@ class aioresponses(object):
             repeat: bool = False,
             timeout: bool = False,
             reason: Optional[str] = None,
-            callback: Optional[Callable] = None) -> None:
-        self._matches.append(RequestMatch(
+            callback: Optional[Callable] = None) -> RequestMatcher:
+
+        matcher = RequestMatcher(
             url,
             method=method,
             status=status,
@@ -310,7 +356,10 @@ class aioresponses(object):
             timeout=timeout,
             reason=reason,
             callback=callback,
-        ))
+        )
+        self._matches.append(matcher)
+
+        return matcher
 
     @staticmethod
     def is_exception(resp_or_exc: Union[ClientResponse, Exception]) -> bool:
@@ -326,38 +375,59 @@ class aioresponses(object):
     async def match(
             self, method: str, url: URL,
             allow_redirects: bool = True, **kwargs: Dict
-    ) -> Optional['ClientResponse']:
+    ) -> Optional[ClientResponse]:
         history = []
         while True:
             for i, matcher in enumerate(self._matches):
                 if matcher.match(method, url):
-                    response_or_exc = await matcher.build_response(
+                    # noinspection PyTypeChecker
+                    response = await matcher.build_response(
                         url, allow_redirects=allow_redirects, **kwargs
                     )
+
+                    if not history:
+                        # record original call once
+
+                        key = (method, url)
+                        self.requests.setdefault(key, [])
+                        try:
+                            kwargs_copy = copy.deepcopy(kwargs)
+                        except TypeError:
+                            # Handle the fact that some values cannot be deep copied
+                            kwargs_copy = kwargs
+
+                        request_info = RequestInfo(
+                            method=method,
+                            url=url,
+                            **kwargs_copy,
+                            response=response
+                        )
+
+                        self.requests[key].append(request_info)
+                        matcher.requests.append(request_info)
+
                     break
             else:
                 return None
 
             if matcher.repeat is False:
                 del self._matches[i]
+            if isinstance(response, Exception):
+                raise response
 
-            if self.is_exception(response_or_exc):
-                raise response_or_exc
-
-            if response_or_exc.status in (
+            if response.status in (
                     301, 302, 303, 307, 308) and allow_redirects:
-                if hdrs.LOCATION not in response_or_exc.headers:
+                if hdrs.LOCATION not in response.headers:
                     break
-                history.append(response_or_exc)
-                url = URL(response_or_exc.headers[hdrs.LOCATION])
-                method = 'get'
+                history.append(response)
+                url = URL(response.headers[hdrs.LOCATION])
                 continue
             else:
                 break
 
-        response_or_exc._history = tuple(history)
+        response._history = tuple(history)
 
-        return response_or_exc
+        return response
 
     async def _request_mock(self, orig_self: ClientSession,
                             method: str, url: 'Union[URL, str]',
@@ -367,31 +437,25 @@ class aioresponses(object):
         if orig_self.closed:
             raise RuntimeError('Session is closed')
 
-        url_origin = url
-        url = normalize_url(merge_params(url, kwargs.get('params')))
+        not_normalized_url = merge_params(url, kwargs.get('params'))
+        url = normalize_url(not_normalized_url)
         url_str = str(url)
         for prefix in self._passthrough:
             if url_str.startswith(prefix):
                 return (await self.patcher.temp_original(
-                    orig_self, method, url_origin, *args, **kwargs
+                    orig_self, method, not_normalized_url, *args, **kwargs
                 ))
 
-        key = (method, url)
-        self.requests.setdefault(key, [])
-        try:
-            kwargs_copy = copy.deepcopy(kwargs)
-        except TypeError:
-            # Handle the fact that some values cannot be deep copied
-            kwargs_copy = kwargs
-        self.requests[key].append(RequestCall(args, kwargs_copy))
-
-        response = await self.match(method, url, **kwargs)
-
+        response = await self.match(method, url, *args, **kwargs)
         if response is None:
-            raise ClientConnectionError(
-                'Connection refused: {} {}'.format(method, url)
-            )
-        self._responses.append(response)
+            if not self._passthrough_all:
+                raise ClientConnectionError(
+                    'Connection refused: {} {}'.format(method, url)
+                )
+            else:
+                return (await self.patcher.temp_original(
+                    orig_self, method, not_normalized_url, *args, **kwargs
+                ))
 
         # Automatically call response.raise_for_status() on a request if the
         # request was initialized with raise_for_status=True. Also call
